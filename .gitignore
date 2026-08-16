@@ -1,69 +1,86 @@
-# Prerequisites
-*.d
+# CMake / build
+build/
+Build/
+out/
+cmake-build-*/
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+CMakeUserPresets.json
+compile_commands.json
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+install_manifest.txt
+*.cmake
+!CMakeLists.txt
 
-# Compiled Object files
-*.slo
-*.lo
+# Object files and binaries
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
+*.a
 *.so
 *.dylib
 *.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
 *.exe
 *.out
 *.app
+*.d
+*.dwo
+*.gch
+*.pch
+*.ilk
+*.pdb
+*.slo
+*.lo
+*.lai
+*.la
+*.lib
+*.mod
+*.smod
+*.dSYM/
+journal_run
+journal_replay
+journal_tests
+phase1_tests
+identity_tests
+core
+core.*
 
-# Build directories
-build/
-Build/
-build-*/
+# Test / CTest output
+Testing/
+CTestTestfile.cmake
+DartConfiguration.tcl
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
+# Journal runtime artifacts (keep scenarios/; ignore local runs)
+*.jnl
+*.journal
+journals/
+runs/
 
-# Temporary files
-*.tmp
+# Logs / temp
 *.log
+*.tmp
 *.bak
-*.swp
+*.orig
+*.user
 
-# vcpkg
+# Tooling / language servers / package managers
+.cache/
+.ccls-cache/
+.clangd/
 vcpkg_installed/
 
-# debug information files
-*.dwo
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.xcuserstate
+xcuserdata/
 
-# test output & cache
-Testing/
-.cache/
+# OS
+.DS_Store
+Thumbs.db
