@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>C++ Code Reference — Project Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <a class="back" href="index.html">← Theory index</a>
+    <span class="toc-label">Contents</span>
+    <ol id="toc-list">
+      <li><a href="#dialect"><span class="num">01</span>Dialect &amp; scope</a></li>
+      <li><a href="#feature-map"><span class="num">02</span>Feature → module map</a></li>
+      <li><a href="#headers"><span class="num">03</span>Headers checklist</a></li>
+      <li><a href="#binary"><span class="num">04</span>Binary &amp; packing</a></li>
+      <li><a href="#io"><span class="num">05</span>File I/O &amp; RAII</a></li>
+      <li><a href="#enums"><span class="num">06</span>enum class &amp; errors</a></li>
+      <li><a href="#cli"><span class="num">07</span>CLI &amp; filesystem</a></li>
+      <li><a href="#unused"><span class="num">08</span>Deliberately unused</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">C++ <span class="brace">{</span> Code reference <span class="brace">}</span></h1>
+      <p class="subtitle">Language and library pieces used in this tree — packing, fixed-width ints, file I/O, CRC, RAII — mapped to headers under <code class="inline">include/</code>. Companion to the systems notes, not a general C++ tutorial.</p>
+    </header>
+
+    <section id="dialect">
+      <div class="section-head"><span class="idx">01</span><h2>Dialect &amp; scope</h2></div>
+      <table>
+        <tr><th>Item</th><th>In this project</th></tr>
+        <tr><td>Standard</td><td><code class="inline">C++17</code></td></tr>
+        <tr><td>Deps</td><td>C++ standard library + POSIX <code class="inline">open</code>/<code class="inline">write</code>/<code class="inline">fsync</code>; vendored LOB</td></tr>
+        <tr><td>Concurrency</td><td>None in v1 — single-threaded run/replay</td></tr>
+        <tr><td>Networking</td><td>None — framing is on disk</td></tr>
+        <tr><td>Build shape</td><td><code class="inline">journal_run</code>, <code class="inline">journal_replay</code>, <code class="inline">phase1_tests</code>, <code class="inline">journal_tests</code>, <code class="inline">identity_tests</code></td></tr>
+      </table>
+      <div class="card">
+        <span class="card-label">Decision</span>
+        <p><strong>C++17 floor</strong> for <code class="inline">&lt;filesystem&gt;</code>, <code class="inline">&lt;cstdint&gt;</code>, <code class="inline">std::optional</code> at boundaries. Rejected: pulling Boost.Serialization / protobuf — the lesson is hand-rolled records.</p>
+      </div>
+    </section>
+
+    <section id="feature-map">
+      <div class="section-head"><span class="idx">02</span><h2>Feature → file map</h2></div>
+      <table>
+        <tr><th>Feature</th><th>Home</th><th>How you use it</th></tr>
+        <tr>
+          <td><code class="inline">#pragma pack</code> / <code class="inline">static_assert</code></td>
+          <td><code class="inline">journal_record.hpp</code></td>
+          <td>Stable on-disk sizeof</td>
+        </tr>
+        <tr>
+          <td><code class="inline">uint8_t</code>…<code class="inline">uint64_t</code></td>
+          <td>record bodies</td>
+          <td>Portable field widths</td>
+        </tr>
+        <tr>
+          <td>CRC32</td>
+          <td><code class="inline">crc32.hpp</code> / record encode</td>
+          <td>Per-record trailer</td>
+        </tr>
+        <tr>
+          <td>POSIX <code class="inline">open</code>/<code class="inline">write</code>/<code class="inline">fsync</code></td>
+          <td><code class="inline">journal_writer.hpp</code></td>
+          <td>Append bytes; optional per-record fsync; fsync on close</td>
+        </tr>
+        <tr>
+          <td><code class="inline">std::ifstream</code> + buffer</td>
+          <td><code class="inline">journal_reader.hpp</code></td>
+          <td>Slurp file; sequential decode</td>
+        </tr>
+        <tr>
+          <td>RAII file guard</td>
+          <td>writer/reader</td>
+          <td>Close/flush on scope exit</td>
+        </tr>
+        <tr>
+          <td><code class="inline">std::filesystem::path</code></td>
+          <td>CLIs + tests</td>
+          <td>Journal paths</td>
+        </tr>
+        <tr>
+          <td><code class="inline">enum class</code></td>
+          <td>CmdType, JournalError</td>
+          <td>Fail-closed status</td>
+        </tr>
+        <tr>
+          <td><code class="inline">std::vector&lt;uint8_t&gt;</code></td>
+          <td>encode buffer</td>
+          <td>Staging a record</td>
+        </tr>
+        <tr>
+          <td>LOB types</td>
+          <td><code class="inline">include/lob/*</code></td>
+          <td>submit/cancel only</td>
+        </tr>
+      </table>
+      <div class="code-wrap">
+        <div class="code-bar"><span>mental model</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-text">pack + fixed ints     → on-disk layout
+crc32                 → integrity trailer
+POSIX write + fsync   → durability
+RAII                  → no leaked fds
+filesystem::path      → CLI args
+enum class            → typed errors
+lob::MatchingEngine   → black-box rematch</code></pre>
+      </div>
+    </section>
+
+    <section id="headers">
+      <div class="section-head"><span class="idx">03</span><h2>Headers checklist</h2></div>
+      <table>
+        <tr><th>Header</th><th>Typical use</th></tr>
+        <tr><td><code class="inline">&lt;cstdint&gt;</code></td><td>Fixed-width integers on disk</td></tr>
+        <tr><td><code class="inline">&lt;cstring&gt;</code></td><td><code class="inline">memcpy</code> into encode buffer</td></tr>
+        <tr><td><code class="inline">&lt;vector&gt;</code></td><td>Byte buffers; event lists in tests</td></tr>
+        <tr><td><code class="inline">&lt;fstream&gt;</code></td><td>Binary file streams</td></tr>
+        <tr><td><code class="inline">&lt;filesystem&gt;</code></td><td>Paths</td></tr>
+        <tr><td><code class="inline">&lt;optional&gt;</code></td><td>Optional decode results</td></tr>
+        <tr><td><code class="inline">&lt;string_view&gt;</code></td><td>CLI / error messages</td></tr>
+        <tr><td><code class="inline">&lt;unistd.h&gt;</code> / <code class="inline">&lt;fcntl.h&gt;</code></td><td>POSIX open/write/fsync if not using iostreams alone</td></tr>
+      </table>
+    </section>
+
+    <section id="binary">
+      <div class="section-head"><span class="idx">04</span><h2>Binary &amp; packing habits</h2></div>
+      <ul>
+        <li>Prefer explicit encode/decode functions over casting host structs to <code class="inline">char*</code> for the whole file.</li>
+        <li><code class="inline">static_assert(sizeof(NewBody) == …)</code> next to packed structs.</li>
+        <li>Write multi-byte integers in documented endianness (LE for v1).</li>
+        <li>Never serialize <code class="inline">bool</code> as a raw compiler bool without fixing width — use <code class="inline">uint8_t</code>.</li>
+      </ul>
+      <div class="code-wrap">
+        <div class="code-bar"><span>LE store helper sketch</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-cpp">inline void store_u64_le(uint8_t* p, uint64_t v) {
+  for (int i = 0; i &lt; 8; ++i)
+    p[i] = static_cast&lt;uint8_t&gt;((v &gt;&gt; (8 * i)) &amp; 0xff);
+}</code></pre>
+      </div>
+    </section>
+
+    <section id="io">
+      <div class="section-head"><span class="idx">05</span><h2>File I/O &amp; RAII</h2></div>
+      <p>Pattern from MDS sockets, applied to files:</p>
+      <ul>
+        <li>Own the handle in a class; close in destructor.</li>
+        <li>Delete copy constructor/assignment; implement move if needed.</li>
+        <li>Check every write’s return length; short writes are errors.</li>
+        <li>Open journals with binary mode / <code class="inline">O_RDONLY</code> vs <code class="inline">O_CREAT|O_TRUNC|O_WRONLY</code>.</li>
+      </ul>
+    </section>
+
+    <section id="enums">
+      <div class="section-head"><span class="idx">06</span><h2><code class="inline">enum class</code> &amp; errors</h2></div>
+      <p>Use scoped enums for <code class="inline">CmdType</code> and <code class="inline">JournalError</code>. Map to exit codes in CLIs (<code class="inline">0</code> = success). Prefer returning status over throwing in the hot read loop (exceptions OK for “can’t open file” in <code class="inline">main</code> if you keep it consistent).</p>
+    </section>
+
+    <section id="cli">
+      <div class="section-head"><span class="idx">07</span><h2>CLI &amp; filesystem</h2></div>
+      <ul>
+        <li>Parse <code class="inline">argv</code> manually (no gflags) — same as other repos.</li>
+        <li><code class="inline">std::filesystem::path</code> for <code class="inline">-o run.jnl</code>.</li>
+        <li>Print human errors to stderr; keep stdout for event lines if you pipe demos.</li>
+      </ul>
+    </section>
+
+    <section id="unused">
+      <div class="section-head"><span class="idx">08</span><h2>Deliberately unused in v1</h2></div>
+      <table>
+        <tr><th>Feature</th><th>Why not</th></tr>
+        <tr><td><code class="inline">std::thread</code> / atomics</td><td>Gateway’s lesson</td></tr>
+        <tr><td>Sockets / <code class="inline">poll</code></td><td>MDS’s lesson</td></tr>
+        <tr><td><code class="inline">mmap</code></td><td>Optional later</td></tr>
+        <tr><td>Protobuf / JSON libs</td><td>Hand-rolled format is the point</td></tr>
+        <tr><td>SQLite</td><td>Wrong abstraction for this bullet</td></tr>
+      </table>
+      <p class="dim">Related: <a href="Theory_Architecture.html">Architecture</a> · <a href="prep.html">Interview prep</a>.</p>
+    </section>
+
+    <footer>
+      <a href="index.html">← Theory index</a> · <a href="../PLAN.md">PLAN.md</a>
+    </footer>
+  </main>
+</div>
+<script src="theory.js"></script>
+</body>
+</html>

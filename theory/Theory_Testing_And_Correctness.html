@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Testing &amp; Correctness — Knowledge Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <a class="back" href="index.html">← Theory index</a>
+    <span class="toc-label">Contents</span>
+    <ol id="toc-list">
+      <li><a href="#layers"><span class="num">01</span>Test layers</a></li>
+      <li><a href="#unit"><span class="num">02</span>Format &amp; CRC units</a></li>
+      <li><a href="#identity"><span class="num">03</span>Live vs replay</a></li>
+      <li><a href="#neg"><span class="num">04</span>Negative cases</a></li>
+      <li><a href="#lob"><span class="num">05</span>LOB goldens</a></li>
+      <li><a href="#oracles"><span class="num">06</span>What to assert</a></li>
+      <li><a href="#harness"><span class="num">07</span>Harness style</a></li>
+      <li><a href="#decision"><span class="num">08</span>Decision</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">Testing <span class="brace">{</span> Prove identical rebuild <span class="brace">}</span></h1>
+      <p class="subtitle">Unlike the gateway (where multi-shard logs are intentionally non-bit-stable), this project’s headline test <em>is</em> bit-identical live vs replay — plus loud failures on bad journals.</p>
+    </header>
+
+    <section id="layers">
+      <div class="section-head"><span class="idx">01</span><h2>Test layers</h2></div>
+      <table>
+        <tr><th>Layer</th><th>Asserts</th><th>Role</th></tr>
+        <tr>
+          <td><strong>LOB golden</strong></td>
+          <td>Matching rules still correct</td>
+          <td>Vendored engine sanity (optional slim port of LOB tests)</td>
+        </tr>
+        <tr>
+          <td><strong>Record / CRC unit</strong></td>
+          <td>Encode/decode round-trip; CRC vectors</td>
+          <td>Format correctness without files</td>
+        </tr>
+        <tr>
+          <td><strong>Identity</strong></td>
+          <td>Live events/book == replay events/book</td>
+          <td>Core product promise</td>
+        </tr>
+        <tr>
+          <td><strong>Integrity negatives</strong></td>
+          <td>Trunc / corrupt / bad magic → error</td>
+          <td>Fail-closed behavior</td>
+        </tr>
+      </table>
+      <div class="card">
+        <span class="card-label">Contrast with gateway</span>
+        <p>Gateway avoids golden-diffing multi-shard publisher logs (scheduler interleaving). Here the journal is a single ordered stream — identity diffs are the point.</p>
+      </div>
+    </section>
+
+    <section id="unit">
+      <div class="section-head"><span class="idx">02</span><h2>Format &amp; CRC units (write first)</h2></div>
+      <ul>
+        <li>NEW round-trip: host command → bytes → command.</li>
+        <li>CANCEL round-trip.</li>
+        <li>CRC known-answer test.</li>
+        <li>Flip one body byte → <code class="inline">BadChecksum</code>.</li>
+        <li><code class="inline">static_assert</code> packed sizes still hold.</li>
+      </ul>
+      <p class="dim">These tests unblock writer/reader without needing full scenarios.</p>
+    </section>
+
+    <section id="identity">
+      <div class="section-head"><span class="idx">03</span><h2>Live vs replay identity</h2></div>
+      <div class="code-wrap">
+        <div class="code-bar"><span>pattern</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-cpp">// 1) live match, collect events + book digest
+auto live = run_live(scenario);
+
+// 2) journaled run → file
+auto path = write_journal(scenario);
+
+// 3) replay file
+auto replayed = replay_file(path);
+
+expect(live.events == replayed.events);
+expect(book_equal(live.engine, replayed.engine));</code></pre>
+      </div>
+      <p>Start with one small scenario (exact fill) and one partial-fill + cancel. Reuse LOB DSL scenarios under <code class="inline">scenarios/</code> when vendored.</p>
+    </section>
+
+    <section id="neg">
+      <div class="section-head"><span class="idx">04</span><h2>Negative / integrity cases</h2></div>
+      <table>
+        <tr><th>Case</th><th>Setup</th><th>Expect</th></tr>
+        <tr>
+          <td>Truncated tail</td>
+          <td>Write good journal; chop last N bytes</td>
+          <td><code class="inline">TruncatedRecord</code> (or equivalent), non-zero</td>
+        </tr>
+        <tr>
+          <td>Corrupt CRC</td>
+          <td>Flip a byte in last record body</td>
+          <td><code class="inline">BadChecksum</code></td>
+        </tr>
+        <tr>
+          <td>Bad magic</td>
+          <td>Overwrite header magic</td>
+          <td><code class="inline">BadMagic</code></td>
+        </tr>
+        <tr>
+          <td>Unknown type</td>
+          <td>Patch type byte to 0xFF</td>
+          <td><code class="inline">BadType</code></td>
+        </tr>
+      </table>
+      <div class="card warn">
+        <span class="card-label">Temp files</span>
+        <p>Write under <code class="inline">build/</code> or a temp path; <code class="inline">*.jnl</code> is gitignored. Do not commit binary journals.</p>
+      </div>
+    </section>
+
+    <section id="lob">
+      <div class="section-head"><span class="idx">05</span><h2>LOB goldens</h2></div>
+      <p>Keep a thin <code class="inline">lob_tests</code> (or a few cases inside <code class="inline">journal_tests</code>) so a bad LOB vendor copy fails before you debug journal code. Matching bugs look like “replay ≠ live” but root cause is the engine.</p>
+    </section>
+
+    <section id="oracles">
+      <div class="section-head"><span class="idx">06</span><h2>What to assert (and not)</h2></div>
+      <table>
+        <tr><th>Assert</th><th>Skip</th></tr>
+        <tr>
+          <td>Event type / id / qty / price fields</td>
+          <td>Wall-clock timestamps (if present)</td>
+        </tr>
+        <tr>
+          <td>Best bid/ask and resting qtys</td>
+          <td>Exact <code class="inline">fsync</code> timing</td>
+        </tr>
+        <tr>
+          <td>Error enum on bad files</td>
+          <td>Performance SLAs in v1</td>
+        </tr>
+      </table>
+    </section>
+
+    <section id="harness">
+      <div class="section-head"><span class="idx">07</span><h2>Harness style</h2></div>
+      <p>Match companions: hand-rolled <code class="inline">expect()</code>, no Catch2/GTest. CTest targets:</p>
+      <ul>
+        <li><code class="inline">phase1_tests</code> — vendored LOB smoke + scenario loader</li>
+        <li><code class="inline">journal_tests</code> — CRC vector, encode/decode, trunc / bad checksum</li>
+        <li><code class="inline">identity_tests</code> — live event lines ≡ replay</li>
+      </ul>
+    </section>
+
+    <section id="decision">
+      <div class="section-head"><span class="idx">08</span><h2>Decision</h2></div>
+      <div class="card">
+        <span class="card-label">Decision</span>
+        <p><strong>Identity is the primary oracle</strong> (live ≡ journaled live ≡ replay). Integrity negatives are first-class. Rejected: treating “it printed something” as success; rejected: requiring multi-process chaos tests in v1.</p>
+      </div>
+      <p class="dim">Related: <a href="Theory_Replay_And_Recovery.html">Replay</a> · <a href="Theory_Integrity.html">Integrity</a> · <a href="../PLAN.md">PLAN.md</a>.</p>
+    </section>
+
+    <footer>
+      <a href="index.html">← Theory index</a> · <a href="../PLAN.md">PLAN.md</a>
+    </footer>
+  </main>
+</div>
+<script src="theory.js"></script>
+</body>
+</html>

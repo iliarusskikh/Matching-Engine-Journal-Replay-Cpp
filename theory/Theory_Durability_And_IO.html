@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Durability &amp; I/O — Knowledge Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <a class="back" href="index.html">← Theory index</a>
+    <span class="toc-label">Contents</span>
+    <ol id="toc-list">
+      <li><a href="#append"><span class="num">01</span>Append-only</a></li>
+      <li><a href="#write"><span class="num">02</span>Write path</a></li>
+      <li><a href="#fsync"><span class="num">03</span>fsync policy</a></li>
+      <li><a href="#crash"><span class="num">04</span>Crash models</a></li>
+      <li><a href="#api"><span class="num">05</span>C++ I/O choices</a></li>
+      <li><a href="#raii"><span class="num">06</span>RAII handles</a></li>
+      <li><a href="#decision"><span class="num">07</span>Decision</a></li>
+      <li><a href="#pitfalls"><span class="num">08</span>Pitfalls</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">Durability <span class="brace">{</span> Append &amp; flush <span class="brace">}</span></h1>
+      <p class="subtitle">A journal is only useful if records that “succeeded” can be found after a crash. That is an I/O and flush-policy problem, not a matching problem.</p>
+    </header>
+
+    <section id="append">
+      <div class="section-head"><span class="idx">01</span><h2>Why append-only</h2></div>
+      <p>Trading journals almost never update middle bytes. You <strong>append</strong> new records. Benefits:</p>
+      <ul>
+        <li><strong>Simple recovery</strong> — scan from start (or from a snapshot offset later).</li>
+        <li><strong>Crash-friendly</strong> — the only dangerous region is the <em>tail</em> (last partial write).</li>
+        <li><strong>Audit-friendly</strong> — history is immutable once written.</li>
+      </ul>
+      <div class="card">
+        <span class="card-label">Invariant</span>
+        <p>Never rewrite an earlier record in place in v1. If you need a correction, append a compensating command (or start a new journal) — do not patch history.</p>
+      </div>
+    </section>
+
+    <section id="write">
+      <div class="section-head"><span class="idx">02</span><h2>Live write path</h2></div>
+      <div class="code-wrap">
+        <div class="code-bar"><span>journal_run (conceptual)</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-text">for each command in scenario:
+  1. apply to MatchingEngine          // match first or journal first?
+  2. encode(command) → bytes
+  3. write(bytes) to file
+  4. optional fsync
+  5. collect live events for goldens</code></pre>
+      </div>
+      <h3>Match-then-journal vs journal-then-match</h3>
+      <table>
+        <tr><th>Order</th><th>If crash between steps</th><th>v1 lean</th></tr>
+        <tr>
+          <td>Match → journal</td>
+          <td>Book advanced but record missing → replay understates state</td>
+          <td>Acceptable for offline scenario runner; document it</td>
+        </tr>
+        <tr>
+          <td>Journal → match</td>
+          <td>Record present but match never ran → replay may “invent” progress vs last live view</td>
+          <td>Closer to durable-intent systems</td>
+        </tr>
+      </table>
+      <div class="card warn">
+        <span class="card-label">v1 teaching choice</span>
+        <p>For a scenario CLI (not a live exchange), <strong>match then append</strong> is fine and easier to test: you only journal commands you successfully applied. Say this out loud in interviews — production order servers often journal (or replicate) before acknowledging the client.</p>
+      </div>
+    </section>
+
+    <section id="fsync">
+      <div class="section-head"><span class="idx">03</span><h2><code class="inline">fsync</code> policy</h2></div>
+      <p><code class="inline">write</code> / <code class="inline">fwrite</code> usually copies into the kernel page cache. A process crash may still leave data in the cache; a machine power loss may not. <code class="inline">fsync(fd)</code> (or <code class="inline">fdatasync</code>) asks the OS to push file data to stable storage.</p>
+      <table>
+        <tr><th>Policy</th><th>Durability</th><th>Throughput</th></tr>
+        <tr>
+          <td>Never fsync (rely on OS)</td>
+          <td>Weak across power loss</td>
+          <td>Highest</td>
+        </tr>
+        <tr>
+          <td>fsync every record</td>
+          <td>Strongest per command</td>
+          <td>Slow (disk latency per order)</td>
+        </tr>
+        <tr>
+          <td>fsync every N records / batch</td>
+          <td>Bounded loss window</td>
+          <td>Middle</td>
+        </tr>
+        <tr>
+          <td>fsync on close / CLI end</td>
+          <td>Good for offline scenario runs</td>
+          <td>Fine for demos</td>
+        </tr>
+      </table>
+      <div class="card">
+        <span class="card-label">Decision lean</span>
+        <p>Ship a <strong>flag</strong>: default fsync on close (and optionally every record for demos). Measure / discuss the trade-off; do not hard-code “always sync” without noting cost.</p>
+      </div>
+    </section>
+
+    <section id="crash">
+      <div class="section-head"><span class="idx">04</span><h2>Crash models (what you claim)</h2></div>
+      <table>
+        <tr><th>Failure</th><th>What you guarantee in v1</th></tr>
+        <tr>
+          <td>Clean exit after close/fsync</td>
+          <td>Full journal readable; replay = last live book</td>
+        </tr>
+        <tr>
+          <td>Kill −9 mid-run</td>
+          <td>Prefix of complete records OK; last partial record detected via trunc/CRC and rejected</td>
+        </tr>
+        <tr>
+          <td>Power loss without fsync</td>
+          <td>May lose trailing records still in page cache — be honest</td>
+        </tr>
+        <tr>
+          <td>Bit flip in middle of file</td>
+          <td>CRC mismatch → fail closed at that record</td>
+        </tr>
+      </table>
+      <p>Replay must never “guess” past a bad tail. Better to stop and report than to desync the book.</p>
+    </section>
+
+    <section id="api">
+      <div class="section-head"><span class="idx">05</span><h2>C++ I/O choices</h2></div>
+      <table>
+        <tr><th>API</th><th>Pros</th><th>Cons</th></tr>
+        <tr>
+          <td><code class="inline">std::ofstream</code> binary + <code class="inline">write</code></td>
+          <td>Idiomatic C++; RAII</td>
+          <td>fsync needs the underlying fd (<code class="inline">filebuf</code> / POSIX)</td>
+        </tr>
+        <tr>
+          <td>POSIX <code class="inline">open</code>/<code class="inline">write</code>/<code class="inline">fsync</code></td>
+          <td>Clear durability story</td>
+          <td>Manual close; less RAII unless wrapped</td>
+        </tr>
+        <tr>
+          <td><code class="inline">mmap</code> for read</td>
+          <td>Fast large-file scan</td>
+          <td>Out of v1; extra pitfalls</td>
+        </tr>
+      </table>
+      <div class="code-wrap">
+        <div class="code-bar"><span>Writer sketch</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-cpp">class JournalWriter {
+public:
+  explicit JournalWriter(const std::filesystem::path&amp; path,
+                         bool fsync_each = false);
+  void append(const Command&amp; cmd);  // encode + write + optional fsync
+  void sync();                     // explicit fsync
+  ~JournalWriter();                // flush + close (+ sync if policy)
+};</code></pre>
+      </div>
+    </section>
+
+    <section id="raii">
+      <div class="section-head"><span class="idx">06</span><h2>RAII for file handles</h2></div>
+      <p>Same lesson as MDS <code class="inline">SocketGuard</code>: if you own an <code class="inline">int fd</code>, close it in the destructor; delete copy; allow move. Do not leave bare fds in <code class="inline">main</code>.</p>
+      <ul>
+        <li>Open with create/truncate for <code class="inline">journal_run</code> (new run file).</li>
+        <li>Open read-only for <code class="inline">journal_replay</code>.</li>
+        <li>Write header once on create; append records after.</li>
+      </ul>
+    </section>
+
+    <section id="decision">
+      <div class="section-head"><span class="idx">07</span><h2>Project decision</h2></div>
+      <div class="card">
+        <span class="card-label">Decision</span>
+        <p><strong>Append-only binary file</strong> via a small <code class="inline">JournalWriter</code> / <code class="inline">JournalReader</code> RAII pair. Default durability: flush on close; optional per-record <code class="inline">fsync</code>. Match-then-journal for the scenario CLI. Rejected: rewriting mid-file, mmap in v1, pretending power-loss safety without sync.</p>
+      </div>
+    </section>
+
+    <section id="pitfalls">
+      <div class="section-head"><span class="idx">08</span><h2>Common pitfalls</h2></div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Calling it “durable” after <code class="inline">write</code> alone</h4>
+          <p>Page cache ≠ disk. Interviewers love this distinction.</p>
+        </div>
+      </div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Opening the journal in text mode</h4>
+          <p>On some platforms text mode rewrites newlines. Always binary.</p>
+        </div>
+      </div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Buffering incomplete records across process restart</h4>
+          <p>In-memory buffers die with the process. Only complete on-disk records count after recovery.</p>
+        </div>
+      </div>
+      <p class="dim">Related: <a href="Theory_Integrity.html">Integrity</a> · <a href="Theory_Replay_And_Recovery.html">Replay</a>.</p>
+    </section>
+
+    <footer>
+      <a href="index.html">← Theory index</a> · <a href="../PLAN.md">PLAN.md</a>
+    </footer>
+  </main>
+</div>
+<script src="theory.js"></script>
+</body>
+</html>

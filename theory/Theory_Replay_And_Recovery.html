@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Replay &amp; Recovery — Knowledge Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <a class="back" href="index.html">← Theory index</a>
+    <span class="toc-label">Contents</span>
+    <ol id="toc-list">
+      <li><a href="#goal"><span class="num">01</span>Recovery goal</a></li>
+      <li><a href="#algo"><span class="num">02</span>Replay algorithm</a></li>
+      <li><a href="#determinism"><span class="num">03</span>Determinism</a></li>
+      <li><a href="#identity"><span class="num">04</span>Live vs replay</a></li>
+      <li><a href="#idempotency"><span class="num">05</span>Idempotency</a></li>
+      <li><a href="#snapshots"><span class="num">06</span>Snapshots later</a></li>
+      <li><a href="#cli"><span class="num">07</span>CLI shape</a></li>
+      <li><a href="#decision"><span class="num">08</span>Decision</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">Replay <span class="brace">{</span> Rebuild from the log <span class="brace">}</span></h1>
+      <p class="subtitle">Recovery is not “reload RAM.” It is: open the journal, verify records, feed a fresh engine in order, and obtain the same book and event stream you would have gotten live.</p>
+    </header>
+
+    <section id="goal">
+      <div class="section-head"><span class="idx">01</span><h2>What “recovered” means</h2></div>
+      <p>After replay succeeds:</p>
+      <ul>
+        <li>Resting book (bids/asks, quantities, order ids) matches the live run.</li>
+        <li>Emitted event sequence matches (ACCEPT / TRADE / CANCEL lines), ignoring wall-clock timestamps if any.</li>
+        <li>Any L2 / <code class="inline">CHECK_BEST_*</code> style assertions that passed live also pass on the rebuilt engine.</li>
+      </ul>
+      <div class="card">
+        <span class="card-label">Market meaning</span>
+        <p>Audit trail + crash recovery + research replay (“re-run Friday’s tape offline”) — all the same mechanism when the log is commands and matching is deterministic.</p>
+      </div>
+    </section>
+
+    <section id="algo">
+      <div class="section-head"><span class="idx">02</span><h2>Replay algorithm (v1)</h2></div>
+      <div class="code-wrap">
+        <div class="code-bar"><span>journal_replay</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-text">1. open path read-only
+2. read + validate file header (magic, version)
+3. engine = MatchingEngine{}          // empty
+4. while true:
+     status = read_next_record(cmd)
+     if Done: break
+     if Truncated|BadChecksum|BadType: fail exit
+     apply(engine, cmd)               // submit or cancel
+     append events to replay_log
+5. print book / events / run checks
+6. success exit</code></pre>
+      </div>
+      <p>Apply order must match the order commands were journaled — FIFO by file offset. No parallel apply in v1.</p>
+    </section>
+
+    <section id="determinism">
+      <div class="section-head"><span class="idx">03</span><h2>Determinism contract</h2></div>
+      <p>Command journaling only works if:</p>
+      <table>
+        <tr><th>Required</th><th>Forbidden in match path</th></tr>
+        <tr>
+          <td>Same inputs in same order</td>
+          <td>Wall-clock affecting match decisions</td>
+        </tr>
+        <tr>
+          <td>Same LOB version / rules</td>
+          <td>Randomized FIFO tie-breaks</td>
+        </tr>
+        <tr>
+          <td>Same numeric types / scaling</td>
+          <td>Reading “current” external state mid-match</td>
+        </tr>
+      </table>
+      <p>Your vendored LOB already aims at this (golden scenarios). Replay tests are a second line of defense: if someone “improves” matching with a non-deterministic detail, identity tests fail.</p>
+    </section>
+
+    <section id="identity">
+      <div class="section-head"><span class="idx">04</span><h2>Proving live ≡ replay</h2></div>
+      <ol class="plain">
+        <li>Run scenario through engine <strong>without</strong> journal → capture event vector / book snapshot <code class="inline">A</code>.</li>
+        <li>Run same scenario with journaling → capture live <code class="inline">B</code> (should equal <code class="inline">A</code>) and file <code class="inline">F</code>.</li>
+        <li>Replay <code class="inline">F</code> → capture <code class="inline">C</code>.</li>
+        <li>Assert <code class="inline">A == B == C</code> (events + book).</li>
+      </ol>
+      <p class="dim">In tests you can skip the CLI and call writer/reader APIs directly for speed.</p>
+    </section>
+
+    <section id="idempotency">
+      <div class="section-head"><span class="idx">05</span><h2>Idempotency (know the word)</h2></div>
+      <p>If a writer retries after an uncertain <code class="inline">write</code>, you might append the same command twice. Replay would then apply it twice — usually wrong.</p>
+      <ul>
+        <li>v1 scenario runner: single-threaded, no retry layer → low risk.</li>
+        <li>Interview follow-up: sequence numbers per record, or “write once then fsync,” or detect dup ids.</li>
+      </ul>
+      <div class="card warn">
+        <span class="card-label">v1 scope</span>
+        <p>Do not build a full exactly-once protocol. Understand the hazard; keep the writer simple and crash tests focused on trunc/CRC.</p>
+      </div>
+    </section>
+
+    <section id="snapshots">
+      <div class="section-head"><span class="idx">06</span><h2>Snapshots (optional later)</h2></div>
+      <p>Genesis replay is O(n) in journal length. Later:</p>
+      <ul>
+        <li>Periodically serialize book snapshot + byte offset into the journal.</li>
+        <li>Recovery: load snapshot, then replay only the suffix.</li>
+      </ul>
+      <p>Out of v1 on purpose — prove correctness from byte 0 first.</p>
+    </section>
+
+    <section id="cli">
+      <div class="section-head"><span class="idx">07</span><h2>CLI shape (target)</h2></div>
+      <div class="code-wrap">
+        <div class="code-bar"><span>commands</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-bash">./journal_run scenarios/demo.txt -o run.jnl [--fsync-each]
+./journal_replay run.jnl
+# exit 0 → print events / best bid-ask
+# exit ≠ 0 → integrity or I/O error on stderr</code></pre>
+      </div>
+    </section>
+
+    <section id="decision">
+      <div class="section-head"><span class="idx">08</span><h2>Project decision</h2></div>
+      <div class="card">
+        <span class="card-label">Decision</span>
+        <p><strong>Ordered command rematch</strong> from genesis into a fresh engine. Identity with live run is the acceptance test. Snapshots, mmap, and event-journal mode are optional later. Rejected: rebuilding book from TRADE events as the v1 recovery path.</p>
+      </div>
+      <p class="dim">Related: <a href="Theory_Architecture.html">Architecture</a> · <a href="Theory_Testing_And_Correctness.html">Testing</a>.</p>
+    </section>
+
+    <footer>
+      <a href="index.html">← Theory index</a> · <a href="../PLAN.md">PLAN.md</a>
+    </footer>
+  </main>
+</div>
+<script src="theory.js"></script>
+</body>
+</html>

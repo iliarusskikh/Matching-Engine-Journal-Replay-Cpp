@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Theory Notes — Matching Engine Journal &amp; Replay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+</head>
+<body>
+<div class="layout" style="grid-template-columns: minmax(0, 780px);">
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">Theory <span class="brace">{</span> Concepts behind the code <span class="brace">}</span></h1>
+      <p class="subtitle">Notes on command journaling, binary framing on disk, durability, checksums, and deterministic replay. Companion to the LOB (matching), TCP MDS (wire), and gateway (threads). Open the headers under <code class="inline">include/</code> while you read.</p>
+    </header>
+
+    <section>
+      <div class="section-head"><span class="idx">01</span><h2>Reading order</h2></div>
+      <p class="dim">Dependency order. Each note points at concrete files under <code class="inline">include/</code> and <code class="inline">src/</code>.</p>
+      <ol class="index-list">
+        <li>
+          <a href="Theory_Architecture.html">
+            <span class="order">foundation</span>
+            <div class="name">Architecture &amp; decisions</div>
+            <p class="desc">Command journal vs event log, live vs replay paths, modules, locked v1 choices.</p>
+          </a>
+        </li>
+        <li>
+          <a href="Theory_Journal_Format.html">
+            <span class="order">on-disk</span>
+            <div class="name">Journal format</div>
+            <p class="desc">Magic/version, record framing, NEW/CANCEL fields, packing, endianness on disk.</p>
+          </a>
+        </li>
+        <li>
+          <a href="Theory_Durability_And_IO.html">
+            <span class="order">I/O</span>
+            <div class="name">Durability &amp; append I/O</div>
+            <p class="desc">Append-only files, write path, <code class="inline">fsync</code> policy, crash models.</p>
+          </a>
+        </li>
+        <li>
+          <a href="Theory_Integrity.html">
+            <span class="order">integrity</span>
+            <div class="name">Integrity &amp; checksums</div>
+            <p class="desc">Per-record CRC, truncated tails, corrupt bytes, fail-closed replay.</p>
+          </a>
+        </li>
+        <li>
+          <a href="Theory_Replay_And_Recovery.html">
+            <span class="order">recovery</span>
+            <div class="name">Replay &amp; recovery</div>
+            <p class="desc">Ordered rematch, determinism, identity with live run, snapshots later.</p>
+          </a>
+        </li>
+        <li>
+          <a href="Theory_Testing_And_Correctness.html">
+            <span class="order">correctness</span>
+            <div class="name">Testing &amp; correctness</div>
+            <p class="desc">Live vs replay goldens, trunc/corrupt tests, what not to assert.</p>
+          </a>
+        </li>
+      </ol>
+    </section>
+
+    <section>
+      <div class="section-head"><span class="idx">02</span><h2>Language reference</h2></div>
+      <ol class="index-list">
+        <li>
+          <a href="Theory_CodeRef.html">
+            <span class="order">C++</span>
+            <div class="name">C++ Code Reference</div>
+            <p class="desc">Feature → file map for binary I/O, packing, CRC, RAII handles, CLI.</p>
+          </a>
+        </li>
+      </ol>
+    </section>
+
+    <section>
+      <div class="section-head"><span class="idx">03</span><h2>Interview prep</h2></div>
+      <ol class="index-list">
+        <li>
+          <a href="prep.html">
+            <span class="order">Q&amp;A</span>
+            <div class="name">Quant-style prep</div>
+            <p class="desc">Elevator pitch, command vs event log, fsync, CRC, recovery drills.</p>
+          </a>
+        </li>
+      </ol>
+    </section>
+
+    <section>
+      <div class="section-head"><span class="idx">04</span><h2>Not covered here</h2></div>
+      <p class="dim">TCP / <code class="inline">poll</code> (MDS), threads / SPSC (gateway), price-time matching rules (LOB), Raft / multi-node replication — out of v1. See <a href="../PLAN.md">PLAN.md</a>.</p>
+    </section>
+
+    <footer>
+      <a href="../PLAN.md">PLAN.md</a> · <a href="../README.md">README.md</a>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

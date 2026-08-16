@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture — Knowledge Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <a class="back" href="index.html">← Theory index</a>
+    <span class="toc-label">Contents</span>
+    <ol id="toc-list">
+      <li><a href="#purpose"><span class="num">01</span>Purpose</a></li>
+      <li><a href="#paths"><span class="num">02</span>Live &amp; replay</a></li>
+      <li><a href="#command"><span class="num">03</span>Command journal</a></li>
+      <li><a href="#companions"><span class="num">04</span>Vs companions</a></li>
+      <li><a href="#modules"><span class="num">05</span>Modules</a></li>
+      <li><a href="#decisions"><span class="num">06</span>Design decisions</a></li>
+      <li><a href="#rejected"><span class="num">07</span>Rejected alternatives</a></li>
+      <li><a href="#implement"><span class="num">08</span>Implement order</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">Architecture <span class="brace">{</span> Persist &amp; rebuild <span class="brace">}</span></h1>
+      <p class="subtitle">What this repo owns: an append-only command log around a vendored LOB, plus a replay path that rebuilds book state bit-identical to a live run. Networking and concurrency stay in the other projects.</p>
+    </header>
+
+    <section id="purpose">
+      <div class="section-head"><span class="idx">01</span><h2>Purpose</h2></div>
+      <p>The LOB already matches correctly in RAM. The gateway already fans orders across threads. Neither answers: <em>after a crash or cold start, how do we get the same book back?</em></p>
+      <p>This project adds the missing slice: <strong>serialize → append → replay → prove identical</strong>.</p>
+      <div class="card">
+        <span class="card-label">Core idea</span>
+        <p>Log every accepted <em>input</em> (<code class="inline">NEW</code> / <code class="inline">CANCEL</code>). Replay feeds those commands into a fresh <code class="inline">MatchingEngine</code>. Deterministic matching ⇒ same trades and same resting book.</p>
+      </div>
+    </section>
+
+    <section id="paths">
+      <div class="section-head"><span class="idx">02</span><h2>Live path &amp; replay path</h2></div>
+      <div class="code-wrap">
+        <div class="code-bar"><span>v1 data paths</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-text">LIVE (journal_run)
+  scenario.txt
+       │
+       ▼
+  parse NEW / CANCEL ──► MatchingEngine::submit / cancel
+       │                        │
+       │                        ▼
+       │                   live events / L2 checks
+       ▼
+  JournalWriter.append(command) ──► run.jnl  (append-only)
+
+REPLAY (journal_replay)
+  run.jnl
+       │
+       ▼
+  JournalReader (verify CRC) ──► MatchingEngine (fresh)
+       │
+       ▼
+  rebuilt events / book  ==  live goldens</code></pre>
+      </div>
+      <p>Two CLIs, one format. The writer never needs the reader’s state machine; the reader never mutates an existing engine mid-flight — always start empty and rematch from byte 0 (v1).</p>
+    </section>
+
+    <section id="command">
+      <div class="section-head"><span class="idx">03</span><h2>Command journal (not event journal)</h2></div>
+      <table>
+        <tr><th>Design</th><th>Logs</th><th>Replay means</th><th>v1?</th></tr>
+        <tr>
+          <td><strong>A — Command</strong></td>
+          <td>Inputs: <code class="inline">NEW</code>, <code class="inline">CANCEL</code></td>
+          <td>Drive <code class="inline">MatchingEngine</code> again</td>
+          <td>Yes</td>
+        </tr>
+        <tr>
+          <td><strong>B — Event</strong></td>
+          <td>Outputs: ACCEPT / TRADE / CANCEL</td>
+          <td>Audit stream, or rebuild book from events with extra rules</td>
+          <td>Later optional</td>
+        </tr>
+      </table>
+      <p>Command journaling is enough when matching is deterministic: same ordered inputs ⇒ same outputs. You do not store trades on disk; you recompute them. That mirrors LOB scenario goldens and keeps the on-disk schema small.</p>
+      <div class="card warn">
+        <span class="card-label">Assumption you must keep true</span>
+        <p>No hidden non-determinism in the vendored LOB (no wall-clock in match decisions, no random tie-breaks). Replay identity tests will catch regressions.</p>
+      </div>
+    </section>
+
+    <section id="companions">
+      <div class="section-head"><span class="idx">04</span><h2>What each companion owns</h2></div>
+      <table>
+        <tr><th>Repo</th><th>Owns</th><th>Does not own</th></tr>
+        <tr>
+          <td>LOB</td>
+          <td>Price-time rules, in-memory goldens</td>
+          <td>Durable log of a live run</td>
+        </tr>
+        <tr>
+          <td>TCP MDS</td>
+          <td>Binary framing on the <em>wire</em>, <code class="inline">poll</code></td>
+          <td>Order-book persistence</td>
+        </tr>
+        <tr>
+          <td>Gateway</td>
+          <td>Threads, SPSC, backpressure</td>
+          <td>Crash recovery / journal</td>
+        </tr>
+        <tr>
+          <td><strong>This repo</strong></td>
+          <td>Append-only command log, checksums, replay identity</td>
+          <td>TCP, threads, rewriting match rules</td>
+        </tr>
+      </table>
+      <p class="dim">Same framing <em>discipline</em> as MDS (packed binary, explicit endianness) — different medium (file, not socket).</p>
+    </section>
+
+    <section id="modules">
+      <div class="section-head"><span class="idx">05</span><h2>Modules</h2></div>
+      <table>
+        <tr><th>Home</th><th>Responsibility</th></tr>
+        <tr>
+          <td><code class="inline">include/command.hpp</code></td>
+          <td>Host-side <code class="inline">NEW</code> / <code class="inline">CANCEL</code> (<code class="inline">std::variant</code>)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/scenario_loader.hpp</code></td>
+          <td>Parse LOB DSL into commands (ignores <code class="inline">CHECK_*</code>)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/apply_command.hpp</code></td>
+          <td>Drive <code class="inline">MatchingEngine::submit</code> / <code class="inline">cancel</code></td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/crc32.hpp</code></td>
+          <td>CRC-32 helper (integrity, not crypto)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/journal_record.hpp</code></td>
+          <td>On-disk layout, encode/decode, CRC trailer</td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/journal_writer.hpp</code></td>
+          <td>POSIX append + optional <code class="inline">fsync</code></td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/journal_reader.hpp</code></td>
+          <td>Sequential read, verify checksum, fail-closed</td>
+        </tr>
+        <tr>
+          <td><code class="inline">src/journal_run.cpp</code></td>
+          <td>Load scenario → match + journal</td>
+        </tr>
+        <tr>
+          <td><code class="inline">src/journal_replay.cpp</code></td>
+          <td>Read journal → rematch → print book / events</td>
+        </tr>
+        <tr>
+          <td><code class="inline">include/lob/*</code></td>
+          <td>Vendored matching core (black box)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">tests/</code></td>
+          <td><code class="inline">phase1_tests</code>, <code class="inline">journal_tests</code>, <code class="inline">identity_tests</code></td>
+        </tr>
+      </table>
+    </section>
+
+    <section id="decisions">
+      <div class="section-head"><span class="idx">06</span><h2>Locked decisions (v1)</h2></div>
+      <table>
+        <tr><th>Topic</th><th>Choice</th><th>Why</th></tr>
+        <tr>
+          <td>Payload</td>
+          <td>Commands only</td>
+          <td>Small; rematch; pairs with LOB goldens</td>
+        </tr>
+        <tr>
+          <td>Format</td>
+          <td>Binary packed records + per-record checksum</td>
+          <td>Same discipline as MDS; portable</td>
+        </tr>
+        <tr>
+          <td>Threads</td>
+          <td>Single-threaded</td>
+          <td>Persistence lesson without queue noise</td>
+        </tr>
+        <tr>
+          <td>Networking</td>
+          <td>None</td>
+          <td>Covered by MDS</td>
+        </tr>
+        <tr>
+          <td>LOB</td>
+          <td>Vendored under <code class="inline">include/lob/</code></td>
+          <td>Standalone build; do not rewrite matching</td>
+        </tr>
+        <tr>
+          <td>Snapshots / mmap</td>
+          <td>Out of v1</td>
+          <td>Genesis replay is enough to prove the idea</td>
+        </tr>
+        <tr>
+          <td>Dialect</td>
+          <td>C++17</td>
+          <td><code class="inline">&lt;filesystem&gt;</code>, chrono, fixed-width ints</td>
+        </tr>
+      </table>
+    </section>
+
+    <section id="rejected">
+      <div class="section-head"><span class="idx">07</span><h2>Rejected alternatives</h2></div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Text / JSON journal</h4>
+          <p>Fine for demos; weak on CV for binary I/O and integrity. Prefer packed records + CRC so trunc/corrupt tests are meaningful.</p>
+        </div>
+      </div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Event-only log as v1 recovery</h4>
+          <p>Useful for audit of published outputs, but rebuilding the book from events needs extra rules. Rematch from commands is the cleaner recovery story.</p>
+        </div>
+      </div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Embedded SQLite / Raft / multi-node</h4>
+          <p>Wrong lesson for a fourth bullet. One process, one file, correct rebuild.</p>
+        </div>
+      </div>
+      <div class="pitfall">
+        <span class="icon">✕</span>
+        <div>
+          <h4>Rewriting the LOB in this repo</h4>
+          <p>Matching rules already live in the LOB project. Vendor a slim core; spend engineering on journal + replay.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="implement">
+      <div class="section-head"><span class="idx">08</span><h2>Implement order (shipped)</h2></div>
+      <ol class="plain">
+        <li>Vendor LOB + scenario load.</li>
+        <li>Record layout + CRC encode/decode unit tests.</li>
+        <li><code class="inline">JournalWriter</code> + <code class="inline">journal_run</code>.</li>
+        <li><code class="inline">JournalReader</code> + <code class="inline">journal_replay</code>.</li>
+        <li>Identity goldens + trunc/corrupt negatives.</li>
+        <li>Optional polish: docs; <code class="inline">--fsync-each</code> already on the CLI.</li>
+      </ol>
+      <div class="card">
+        <span class="card-label">Related</span>
+        <p><a href="Theory_Journal_Format.html">Journal format</a> · <a href="Theory_Durability_And_IO.html">Durability</a> · <a href="Theory_Replay_And_Recovery.html">Replay</a> · <a href="../PLAN.md">PLAN.md</a></p>
+      </div>
+    </section>
+
+    <footer>
+      <a href="index.html">← Theory index</a> · <a href="../PLAN.md">PLAN.md</a>
+    </footer>
+  </main>
+</div>
+<script src="theory.js"></script>
+</body>
+</html>

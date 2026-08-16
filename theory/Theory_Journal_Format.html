@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Journal Format — Knowledge Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theory.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <a class="back" href="index.html">← Theory index</a>
+    <span class="toc-label">Contents</span>
+    <ol id="toc-list">
+      <li><a href="#why"><span class="num">01</span>Why binary</a></li>
+      <li><a href="#file"><span class="num">02</span>File header</a></li>
+      <li><a href="#record"><span class="num">03</span>Record layout</a></li>
+      <li><a href="#fields"><span class="num">04</span>NEW / CANCEL</a></li>
+      <li><a href="#pack"><span class="num">05</span>Packing</a></li>
+      <li><a href="#endian"><span class="num">06</span>Endianness</a></li>
+      <li><a href="#encode"><span class="num">07</span>Encode / decode</a></li>
+      <li><a href="#version"><span class="num">08</span>Versioning</a></li>
+      <li><a href="#decision"><span class="num">09</span>Decision</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <span class="eyebrow">Matching Engine Journal &amp; Replay · Knowledge notes</span>
+      <h1 class="title">Format <span class="brace">{</span> On-disk records <span class="brace">}</span></h1>
+      <p class="subtitle">How commands become durable bytes. Same spirit as MDS wire framing — packed structs, explicit byte order, a discriminator — but the consumer is a file reader, not <code class="inline">recv</code>.</p>
+    </header>
+
+    <section id="why">
+      <div class="section-head"><span class="idx">01</span><h2>Why binary on disk</h2></div>
+      <ul>
+        <li><strong>Deterministic size</strong> — fixed offsets; easy CRC over a known span.</li>
+        <li><strong>Fast append / scan</strong> — no tokenization; replay is a tight loop.</li>
+        <li><strong>Integrity</strong> — truncate/corrupt tests need a precise “where the record ends.”</li>
+        <li><strong>CV signal</strong> — shows you can design a storage format, not only a socket protocol.</li>
+      </ul>
+      <div class="card">
+        <span class="card-label">vs MDS</span>
+        <p>MDS: fixed-size messages on a TCP <em>stream</em> (partial reads). Journal: complete records appended to a file (partial <em>tail</em> after crash). Framing discipline transfers; failure modes differ.</p>
+      </div>
+    </section>
+
+    <section id="file">
+      <div class="section-head"><span class="idx">02</span><h2>File header (once per journal)</h2></div>
+      <p>Write a short header at create time so a random file is not mistaken for a journal, and so format changes are detectable.</p>
+      <div class="code-wrap">
+        <div class="code-bar"><span>proposed file header (host → little-endian on disk)</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-text">offset  size  field
+0       4     magic      = 'M','E','J','R'   // Matching Engine Journal Replay
+4       2     version    = 1
+6       2     flags      = 0                // reserved (e.g. fsync policy note)
+8       8     created_ns = steady or wall   // optional; wall ok for metadata only
+────────────────────────────────────────────
+total  16 bytes, packed</code></pre>
+      </div>
+      <p class="dim">Do not put match decisions in the header. Metadata only. Replay ignores <code class="inline">created_ns</code> for book state.</p>
+    </section>
+
+    <section id="record">
+      <div class="section-head"><span class="idx">03</span><h2>Record framing</h2></div>
+      <table>
+        <tr><th>Scheme</th><th>Idea</th><th>v1 lean</th></tr>
+        <tr>
+          <td>Fixed-size by type</td>
+          <td>Read <code class="inline">type</code>, then known remainder</td>
+          <td>Good if NEW and CANCEL sizes are fixed</td>
+        </tr>
+        <tr>
+          <td>Length-prefixed</td>
+          <td><code class="inline">uint32 len</code> + payload + CRC</td>
+          <td>More flexible; slightly more states</td>
+        </tr>
+      </table>
+      <p>Recommended v1: <strong>type byte + fixed body per type + CRC32 trailer</strong>. Both command kinds are small and fixed — no strings. Reader algorithm:</p>
+      <ol class="plain">
+        <li>Need at least 1 byte of <code class="inline">type</code>.</li>
+        <li>Map type → expected body size <code class="inline">N</code>.</li>
+        <li>Need <code class="inline">1 + N + 4</code> bytes total; if EOF mid-record → truncated tail (fail).</li>
+        <li>Verify CRC over <code class="inline">type ‖ body</code>; mismatch → corrupt.</li>
+      </ol>
+      <div class="code-wrap">
+        <div class="code-bar"><span>record sketch</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-text">[ type:u8 ][ body: fixed by type ][ crc32:u32 ]
+
+type 1 = NEW
+type 2 = CANCEL
+// unknown type → fail closed (do not skip)</code></pre>
+      </div>
+    </section>
+
+    <section id="fields">
+      <div class="section-head"><span class="idx">04</span><h2>Command bodies</h2></div>
+      <p>Mirror the LOB request fields you already use in scenarios — enough to call <code class="inline">submit</code> / <code class="inline">cancel</code> without re-parsing text.</p>
+      <table>
+        <tr><th>Type</th><th>Body fields (suggested)</th><th>Notes</th></tr>
+        <tr>
+          <td><code class="inline">NEW</code></td>
+          <td><code class="inline">order_id:u64</code>, <code class="inline">side:u8</code>, <code class="inline">otype:u8</code>, <code class="inline">qty:i64</code>, <code class="inline">price:i64</code></td>
+          <td>Qty/price match LOB <code class="inline">int64_t</code> ticks</td>
+        </tr>
+        <tr>
+          <td><code class="inline">CANCEL</code></td>
+          <td><code class="inline">order_id:u64</code></td>
+          <td>Idempotent cancel semantics live in the LOB</td>
+        </tr>
+      </table>
+      <div class="code-wrap">
+        <div class="code-bar"><span>journal_record.hpp</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-cpp">enum class CmdType : uint8_t { New = 1, Cancel = 2 };
+
+#pragma pack(push, 1)
+struct NewBody {
+  uint64_t order_id;
+  uint8_t  side;      // 0 buy / 1 sell — map to lob::Side
+  uint8_t  otype;     // limit / market
+  int64_t  qty;
+  int64_t  price;     // ticks
+};
+struct CancelBody {
+  uint64_t order_id;
+};
+#pragma pack(pop)
+
+// Disk record = type + body + crc32(type||body)
+static_assert(sizeof(NewBody) == 26, "…");
+static_assert(sizeof(CancelBody) == 8, "…");</code></pre>
+      </div>
+      <div class="card warn">
+        <span class="card-label">Single-symbol v1</span>
+        <p>Omit <code class="inline">symbol_id</code> until you need multi-book journals. Gateway sharding is a different problem; this repo is one engine, one log.</p>
+      </div>
+    </section>
+
+    <section id="pack">
+      <div class="section-head"><span class="idx">05</span><h2>Packing / alignment</h2></div>
+      <p>Compilers insert padding between members. On disk that makes <code class="inline">sizeof</code> compiler-dependent — bad for goldens and CRC spans.</p>
+      <ul>
+        <li>Use <code class="inline">#pragma pack(push, 1)</code> … <code class="inline">pack(pop)</code> around on-disk structs.</li>
+        <li><code class="inline">static_assert</code> exact sizes in the header (MDS pattern).</li>
+        <li>Prefer encode field-by-field into a byte buffer over <code class="inline">fwrite(&amp;host_struct)</code> if you ever need cross-endian files.</li>
+      </ul>
+    </section>
+
+    <section id="endian">
+      <div class="section-head"><span class="idx">06</span><h2>Endianness on disk</h2></div>
+      <p>Network byte order is big-endian. For a <strong>local journal</strong> that only ever runs on one machine, little-endian fixed layout is fine and matches Apple Silicon / x86 hosts.</p>
+      <table>
+        <tr><th>Choice</th><th>When</th></tr>
+        <tr>
+          <td><strong>LE fixed (recommended v1)</strong></td>
+          <td>Single-host learning project; document “LE on disk”</td>
+        </tr>
+        <tr>
+          <td>BE / network order</td>
+          <td>If you want identical habits to MDS <code class="inline">hton*</code></td>
+        </tr>
+      </table>
+      <div class="card">
+        <span class="card-label">Decision lean</span>
+        <p><strong>Little-endian packed</strong> + document it in the header comment and README. Optional later: a flag bit for BE. Never leave endianness implicit in interviews — say which you picked and why.</p>
+      </div>
+    </section>
+
+    <section id="encode">
+      <div class="section-head"><span class="idx">07</span><h2>Encode / decode API shape</h2></div>
+      <div class="code-wrap">
+        <div class="code-bar"><span>mental API</span><button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+        <pre><code class="language-cpp">// Host-side command (not packed):
+struct Command { CmdType type; /* union or variant fields */ };
+
+// Serialize into bytes ready for append (includes CRC):
+std::vector&lt;uint8_t&gt; encode(const Command&amp; c);
+
+// Parse one record from a buffer; returns bytes consumed or error:
+enum class ReadStatus { Ok, Truncated, BadChecksum, BadType, Done };
+ReadStatus decode_one(const uint8_t* p, size_t n,
+                      Command&amp; out, size_t&amp; consumed);</code></pre>
+      </div>
+      <p>Keep <strong>LOB types out of the on-disk structs</strong> if possible — map <code class="inline">side</code>/<code class="inline">otype</code> bytes to <code class="inline">lob::Side</code> / <code class="inline">OrderType</code> at the boundary. That keeps the journal format independent of LOB header churn.</p>
+    </section>
+
+    <section id="version">
+      <div class="section-head"><span class="idx">08</span><h2>Versioning habit</h2></div>
+      <ul>
+        <li>Bump <code class="inline">version</code> in the file header when the record layout changes.</li>
+        <li>Readers that see an unknown version must refuse to replay (fail closed).</li>
+        <li>Do not silently reinterpret old bytes under a new layout.</li>
+      </ul>
+    </section>
+
+    <section id="decision">
+      <div class="section-head"><span class="idx">09</span><h2>Project decision</h2></div>
+      <div class="card">
+        <span class="card-label">Decision</span>
+        <p><strong>16-byte file header</strong> (magic <code class="inline">MEJR</code>, version 1) + <strong>type-discriminated fixed bodies</strong> for NEW/CANCEL + <strong>CRC32 trailer</strong> over type‖body. Little-endian packed. Rejected: JSON lines, length-prefixed variable blobs in v1, embedding full LOB event streams.</p>
+      </div>
+      <p class="dim">Related: <a href="Theory_Integrity.html">Integrity</a> · <a href="Theory_Durability_And_IO.html">Durability</a> · MDS <code class="inline">Theory_Binary_Protocol</code> (wire twin).</p>
+    </section>
+
+    <footer>
+      <a href="index.html">← Theory index</a> · <a href="../PLAN.md">PLAN.md</a>
+    </footer>
+  </main>
+</div>
+<script src="theory.js"></script>
+</body>
+</html>

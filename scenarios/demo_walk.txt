@@ -1,0 +1,8 @@
+# One-symbol demo for Phase 3 Concurrent Order Gateway.
+# Symbol defaults to 0 inside the pipeline.
+#
+# Rest a buy, rest a sell above, then hit the bid with a sell at 100 → one trade.
+
+NEW 1 BUY  LIMIT 10 100
+NEW 2 SELL LIMIT 10 101
+NEW 3 SELL LIMIT 10 100
