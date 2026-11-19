@@ -8,8 +8,7 @@ Companion to the [Limit Order Book](https://github.com/iliarusskikh/Limit-Order-
 
 | Doc | Purpose |
 |-----|---------|
-| [`PLAN.md`](PLAN.md) | Roadmap, scope cuts, reading order |
-| [`theory/index.html`](theory/index.html) | Knowledge notes (format, durability, CRC, replay, interview prep) |
+| [`theory/index.html`](theory/index.html) | Knowledge notes (format, durability, CRC, replay) |
 | [`LICENSE`](LICENSE) | MIT |
 
 ---
@@ -82,7 +81,6 @@ Focus: **serialize → store → rebuild → prove identical** — not networkin
 ```
 ├── CMakeLists.txt
 ├── LICENSE
-├── PLAN.md
 ├── README.md
 ├── theory/              # HTML knowledge notes
 ├── include/

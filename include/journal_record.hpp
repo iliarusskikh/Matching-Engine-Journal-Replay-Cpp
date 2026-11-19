@@ -156,7 +156,7 @@ inline DecodeStatus decode_header(const std::uint8_t* p, std::size_t n, JournalF
 
 // Encode one command to type‖body‖crc32 (little-endian multi-byte fields).
 inline std::vector<std::uint8_t> encode_record(const Command& cmd) {
-  std::vector<std::uint8_t> buf;
+  std::vector<std::uint8_t> buf; // buffer to store the encoded record
 
   if (const auto* n = std::get_if<NewCommand>(&cmd)) {
     buf.resize(1 + sizeof(NewBody) + 4);
